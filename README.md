@@ -38,6 +38,13 @@
   <img src="assets/teaser.jpg" alt="From one physical world to diverse virtual worlds" width="100%">
 </p>
 
+## V100 Transformers server in this fork
+
+This fork adds a single-GPU FP16 Transformers backend for the original client.
+See [the V100 deployment guide](docs/v100-transformers.md) for installation,
+authenticated endpoints, verification, and limitations. The upstream client,
+action protocol, prompts, examples, and evaluation adapters are retained.
+
 ## News
 
 - **2026-11-11**: 🎉 Evaluation code is now available for Minecraft (OpenHA), ViZDoom, OmniGameArena, and GameWorld! [Code & setup](evaluation/README.md).

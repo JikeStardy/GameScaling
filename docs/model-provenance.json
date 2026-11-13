@@ -1,0 +1,26 @@
+{
+  "model_id": "THUSI-Lab/GameScaling-0.8B-S3",
+  "verification_date": "2026-11-13",
+  "modelscope_api": "https://modelscope.cn/api/v1/models/THUSI-Lab/GameScaling-0.8B-S3/repo/files?Revision=master&Recursive=true",
+  "huggingface_api": "https://huggingface.co/api/models/THUSI-Lab/GameScaling-0.8B-S3?blobs=true",
+  "huggingface_revision": "e41159614185e16130d3eadba8a0e865ccf24f33",
+  "modelscope_weight_file_revision": "059f13663ceff3b483d4db78c54a6246f9af706c",
+  "modelscope_latest_revision_prefix": "599c71b8",
+  "weight": {
+    "filename": "model.safetensors",
+    "size_bytes": 2214590296,
+    "expected_sha256": "d553c0796833691e32277a937db649eaac39bae9a0028a63c964c12a261c2dfa",
+    "source_manifests_agree": true
+  },
+  "core_files_sha256": {
+    "config.json": "57d0255cfb3b9d939ac34b78e610fcef3ea6b33afa21734c74616e451795f89a",
+    "chat_template.jinja": "deb2bf853c951adb45817104c86331d06bf05f83827cf5411f594c84422f6fe1",
+    "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+    "tokenizer_config.json": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b",
+    "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+    "processor_config.json": "d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1",
+    "generation_config.json": "15ed3ac470f13d07c7dba54ec36ac63a58ca1c2fe975d66c37d09482d5c40094",
+    "video_preprocessor_config.json": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+  },
+  "note": "Expected immutable hashes, not a claim that a deployment download is complete. Verify the actual downloaded files against these values before loading. The core small files were independently fetched and byte-compared across the two sources."
+}

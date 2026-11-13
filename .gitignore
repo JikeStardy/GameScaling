@@ -3,3 +3,11 @@ __pycache__/
 *.pyc
 .cache/
 GameScaling-*/
+.venv*/
+.pytest_cache/
+.ruff_cache/
+deployment-results/
+*.pid
+*.log
+.env
+*.secret
