@@ -35,11 +35,12 @@ The parallel variable applies to the `modelscope_hub` backend used by ModelScope
 1.38.1. Archive the download manifest and SHA256 values with deployment records;
 the mutable `master` name alone is not a reproducible model revision.
 
-The server explicitly loads FP16 model weights onto `cuda:0`, uses eager full
-attention and the PyTorch reference linear-attention path, and rejects CPU/disk
-parameter placement. Optional `fla`, `causal-conv1d` and `flash-attn` packages
-must be absent. No compilation is enabled. Reference kernels perform some
-intermediate arithmetic in FP32; this is not an all-FP16 computation claim.
+The server explicitly loads FP16 model weights onto `cuda:0` and rejects CPU/disk
+parameter placement. By default it uses eager full attention and the PyTorch
+reference linear-attention path without compilation. Optional `fla`,
+`causal-conv1d` and `flash-attn` packages must be absent. Reference kernels
+perform some intermediate arithmetic in FP32; this is not an all-FP16
+computation claim. The acceleration options below are explicit opt-ins.
 
 ## Start and use
 
@@ -61,6 +62,62 @@ export GAMESCALING_HOST=127.0.0.1
 export GAMESCALING_PORT=8000
 bash scripts/serve_transformers.sh /workspace/models/gamescaling/GameScaling-0.8B-S3
 ```
+
+The launcher exposes independent options for controlled comparisons. CLI options
+are also available when invoking `python -m gamescaling.server` directly:
+
+| CLI option | Launcher environment variable | Values / default |
+| --- | --- | --- |
+| `--attention-implementation` | `GAMESCALING_ATTENTION` | `eager` (default), `sdpa`, `vision-sdpa` |
+| `--stop-implementation` | `GAMESCALING_STOP_IMPLEMENTATION` | `legacy` (default), `tensor` |
+| `--vision-cache-mib` | `GAMESCALING_VISION_CACHE_MIB` | 0–512 MiB; 0 disables caching (default) |
+| `--gdn-implementation` | `GAMESCALING_GDN_IMPLEMENTATION` | `reference` (default), `cuda` |
+| `--prefill-implementation` | `GAMESCALING_PREFILL_IMPLEMENTATION` | `reference` (default), `solve` |
+| `--decode-implementation` | `GAMESCALING_DECODE_IMPLEMENTATION` | `eager` (default), `cuda-graph` |
+| `--kernel-build-directory` | `GAMESCALING_KERNEL_BUILD_DIRECTORY` | Optional CUDA extension build directory |
+
+`vision-sdpa` selects SDPA only for vision attention; text full attention remains
+eager and Gated DeltaNet (GDN) is selected separately. The visual cache keeps
+bounded image features, keyed by the exact submitted image data and runtime
+fingerprint. It preserves image order and still processes the complete prompt
+and history on every request. It does not cache actions or cross-request KV.
+`tensor` uses Transformers stop-string matching only for the official single
+`<|action_end|>` stop; arbitrary strings and multiple stops retain the original
+string matcher, with unchanged response and finish-reason semantics.
+
+`gdn-implementation=cuda` compiles the supplied SM70 CUDA extension and fuses
+only supported single-token recurrent steps; prefill remains a separate choice.
+`prefill-implementation=solve` uses FP32 triangular solves for supported prefill
+shapes. Unsupported shapes use the original reference path. Arithmetic order
+can differ, so compare raw actions as well as latency, especially near token
+ties. These flags do not establish gameplay quality.
+
+`decode-implementation=cuda-graph` captures supported single-token forwards
+while prefill and generation bookkeeping remain eager. It requests a static KV
+cache with `disable_compile=True` and enters the graph context inside inference
+mode. Its bounded graph cache reports captures, replays, bypasses and errors;
+initial warmup/capture costs remain part of request timing. Unsupported inputs
+bypass to eager before changing decode state. Capture failures restore the probe
+state. Capture and replay errors propagate rather than silently retrying a
+partially consumed step; the next generation must reset the failed cache.
+
+For an explicit acceleration experiment, keep the same images, history, output
+budget and FP16 model while selecting:
+
+```bash
+export GAMESCALING_ATTENTION=vision-sdpa
+export GAMESCALING_VISION_CACHE_MIB=64
+export GAMESCALING_GDN_IMPLEMENTATION=cuda
+export GAMESCALING_PREFILL_IMPLEMENTATION=solve
+export GAMESCALING_DECODE_IMPLEMENTATION=cuda-graph
+bash scripts/serve_transformers.sh /workspace/models/gamescaling/GameScaling-0.8B-S3
+```
+
+This is a validation configuration, not an assumed faster default. Authenticated
+`GET /v1/models` metadata reports actual attention backends, prefill/recurrent
+kernel calls and fallbacks, image-cache counters, and graph statistics. Inspect
+the counters to verify that the intended paths really execute; parameter
+placement remains entirely on the GPU for every option.
 
 One process owns the model. Keep one Uvicorn worker; a second worker would load
 a second copy. The process can be run using `nohup` in the container with its
