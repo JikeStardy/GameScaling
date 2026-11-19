@@ -22,33 +22,7 @@ from PIL import Image
 import requests
 
 from gamescaling import GameScalingPolicy, PolicyConfig
-from gamescaling.action import ACTION_END, ACTION_START, KEY_VOCAB, split_reasoning
-
-
-def strict_action(text: str, finish: str | None) -> tuple[bool, str]:
-    """Validate the raw action before the upstream parser can clamp/drop keys."""
-    if finish != "stop":
-        return False, "generation_did_not_finish"
-    _, tail, closed = split_reasoning(text)
-    if not closed or not tail.strip().startswith(ACTION_START):
-        return False, "missing_action_or_unclosed_reasoning"
-    body, sep, extra = tail.strip()[len(ACTION_START):].partition(ACTION_END)
-    if not sep or extra.strip():
-        return False, "missing_end_or_trailing_text"
-    groups = body.split(";")
-    if len(groups) != 7:
-        return False, "wrong_group_count"
-    try:
-        xyz = [float(v) for v in groups[0].split()]
-    except ValueError:
-        return False, "invalid_mouse"
-    if (len(xyz) != 3 or not all(math.isfinite(v) for v in xyz)
-            or any(abs(v) > bound for v, bound in zip(xyz, (1000, 1000, 5)))):
-        return False, "invalid_mouse_range"
-    if any(len(g.split()) > 4 or any(k not in KEY_VOCAB for k in g.split())
-           for g in groups[1:]):
-        return False, "invalid_keys"
-    return True, "valid"
+from gamescaling.action import ACTION_END, strict_action
 
 
 def summarize(rows: list[dict]) -> dict:

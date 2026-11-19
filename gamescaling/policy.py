@@ -98,6 +98,15 @@ class Decision:
     error: str | None = None
 
 
+class Proposal(NamedTuple):
+    """One inference result, with evidence and history kept separate from execution."""
+
+    decision: Decision
+    turn: Turn
+    raw_content: str
+    matched_stop: str | None
+
+
 def encode_image(image: Image.Image, cfg: PolicyConfig) -> str:
     """Resize + encode a frame into the data URL the request carries."""
     img = image
@@ -200,10 +209,17 @@ class GameScalingPolicy:
         return out
 
     def act(self, image: Image.Image) -> Decision:
+        proposal = self.propose(image)
+        self.remember(proposal)
+        return proposal.decision
+
+    def propose(self, image: Image.Image) -> Proposal:
+        """Request a decision without modifying the history for the next request."""
         url = encode_image(image, self.cfg)
         body = build_request(self.messages(url), self.cfg)
         t0 = time.perf_counter()
         text, finish, tokens, error = "", None, None, None
+        matched_stop = None
         try:
             r = self._session.post(f"{self.base_url}/chat/completions", json=body,
                                    timeout=self.cfg.timeout,
@@ -215,15 +231,26 @@ class GameScalingPolicy:
             text = (choice.get("message") or {}).get("content") or ""
             finish = choice.get("finish_reason")
             tokens = (payload.get("usage") or {}).get("completion_tokens")
+            metrics = payload.get("metrics")
+            if isinstance(metrics, dict) and isinstance(metrics.get("matched_stop"), str):
+                matched_stop = metrics["matched_stop"]
+            if not isinstance(text, str):
+                text = ""
+                raise ValueError("invalid response content")
         except (requests.RequestException, ValueError, KeyError) as exc:
             error = str(exc)
             logger.error("policy request failed: %s", exc)
         latency_ms = (time.perf_counter() - t0) * 1000
-        text = finalize(text, finish, self.cfg) if not error else ""
-        action = parse_action(text, lenient=self.cfg.lenient_parse)
-        reasoning, _, closed = split_reasoning(text)
-        self._history.append(Turn(url, reasoning if closed else "", action.history_text))
+        rendered = finalize(text, finish, self.cfg) if not error else ""
+        action = parse_action(rendered, lenient=self.cfg.lenient_parse)
+        reasoning, _, closed = split_reasoning(rendered)
+        turn = Turn(url, reasoning if closed else "", action.history_text)
+        decision = Decision(action=action, text=rendered, reasoning=reasoning, latency_ms=latency_ms,
+                            finish_reason=finish, completion_tokens=tokens, error=error)
+        return Proposal(decision, turn, text, matched_stop)
+
+    def remember(self, proposal: Proposal) -> None:
+        """Commit a turn once the caller confirms its action was executed."""
+        self._history.append(proposal.turn)
         while len(self._history) > self.cfg.history_len:
             self._history.popleft()
-        return Decision(action=action, text=text, reasoning=reasoning, latency_ms=latency_ms,
-                        finish_reason=finish, completion_tokens=tokens, error=error)

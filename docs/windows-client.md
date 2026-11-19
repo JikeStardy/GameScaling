@@ -2,9 +2,7 @@
 
 适用于本 fork 的 `codex/v100-transformers` 分支，以及已经运行的 Linux GameScaling API。Windows 只做客户端，不需要下载模型、安装 CUDA、PyTorch、vLLM、WSL 或 Docker。
 
-**当前能完成：** Windows 连接远端服务，发送示例图片或手动截取的游戏画面，接收动作文本。
-
-**当前尚未实现：** Windows 自动截图循环、游戏窗口绑定、键鼠动作执行、任务启停和停止时释放按键。因此本文不会让《绝区零》自动操作；命令中的 Python 程序只打印模型建议，不发送任何键鼠输入。Linux 服务已通过 GPU 验收。教程中的 Python 单帧程序已从 macOS 经 SSH 隧道调用现有 V100 服务验证通过；PowerShell 和 Windows 步骤尚未在你的游戏机上实机验证。
+Windows 客户端可以发送一张图片，也可以持续截取指定的前台游戏窗口，把最近的画面和动作发给服务，再执行模型返回的键鼠动作。先用观察模式验证窗口和模型输出，再在训练场开启执行。
 
 ## 1. 安装 Windows 依赖
 
@@ -94,127 +92,62 @@ Invoke-RestMethod "$env:GAMESCALING_BASE_URL/models" -Headers $gsHeaders
 
 窗口关闭后，需要在新窗口重新设置 Base URL 和 key。本教程不将 key 持久化到系统环境。
 
-## 5. 创建单帧推理程序
-
-在仓库根目录运行以下整段 PowerShell，创建 `windows_infer_once.py`。这是本教程新建的本地示例文件，不是声称仓库已经带有的启动器。
+## 5. 用示例图片检查推理
 
 ```powershell
-$env:PYTHONUTF8 = "1"
-@'
-import argparse
-import os
-from pathlib import Path
-import sys
-
-from PIL import Image
-from gamescaling import GameScalingPolicy, PolicyConfig
-
-parser = argparse.ArgumentParser(description="Send one image; print actions without executing input")
-parser.add_argument("--image", default="examples/doom_battle1.jpg")
-parser.add_argument("--prompt", default="prompts/example_doom_battle1.txt")
-args = parser.parse_args()
-base_url = os.environ.get("GAMESCALING_BASE_URL", "").strip().rstrip("/")
-api_key = os.environ.get("GAMESCALING_API_KEY", "").strip()
-if not base_url or not api_key or api_key == "EMPTY":
-    parser.error("Set GAMESCALING_BASE_URL and GAMESCALING_API_KEY in this terminal")
-
-cfg = PolicyConfig(
-    base_url=base_url,
-    model="gamescaling",
-    api_key=api_key,
-    image_size=(854, 480),
-    history_len=2,
-    reasoning=False,
-    max_tokens=512,
-    timeout=120.0,
-)
-prompt = Path(args.prompt).read_text(encoding="utf-8-sig").rstrip("\n")
-policy = GameScalingPolicy(prompt, cfg)
-with Image.open(args.image) as source:
-    decision = policy.act(source.convert("RGB"))
-if decision.error:
-    print("Request failed:", decision.error, file=sys.stderr)
-    raise SystemExit(1)
-print("latency_ms:", round(decision.latency_ms, 1))
-print("completion_tokens:", decision.completion_tokens)
-print("model_text:", decision.text)
-print("parsed:", decision.action.parsed)
-print("mouse:", decision.action.mouse)
-print("steps:", decision.action.steps)
-print("No keyboard or mouse input was executed.")
-if not decision.action.parsed or decision.action.truncated or decision.action.dropped:
-    raise SystemExit("Action parsing failed, was truncated or dropped keys")
-'@ | Set-Content -Encoding UTF8 .\windows_infer_once.py
-
-.\.venv\Scripts\python.exe .\windows_infer_once.py
+.\.venv\Scripts\python.exe -m gamescaling.windows_client --image .\examples\doom_battle1.jpg --prompt .\prompts\example_doom_battle1.txt
 ```
 
-预期输出包含 `parsed: True`、鼠标与六组按键状态。温度保持客户端默认1.0，动作内容不必与参考文件一致。`parsed=True` 只说明可解析，不代表游戏任务成功。首次请求可能需要额外预热时间。
+成功时会显示 `Observed`、请求耗时和动作。图片在上传前缩至 854×480。这个入口只打印动作。
 
-此程序每次启动只有一次请求，即使配置 `history_len=2`，该请求的实际历史仍为0。只有复用同一个 `policy` 连续调用 `act()` 才会逐渐积累历史。
+## 6. 观察游戏窗口
 
-仓库原 `examples/run_example.py` 没有API key参数，并默认使用 `EMPTY`。它的 `--offline` 可直接运行；不要把其未鉴权在线命令当成当前服务的可用调用方式，也不要添加不存在的 `--api-key` 参数。
-
-## 6. 用自己的游戏画面做一次观察测试
-
-1. 手动打开游戏，在窗口或无边框窗口中进入训练场。
-2. 用 Windows 截图工具只截取游戏画面，保存为仓库下的 `game.png`。尽量保持16:9；本示例会直接缩放到854×480，超宽画面会被拉伸。游戏本身可以继续以4K运行。
-3. 复制官方提示词模板：
+手动打开《绝区零》，进入训练场。使用窗口或无边框模式，确保游戏窗口完整显示。用 PowerShell 查实际窗口标题和进程名。
 
 ```powershell
+Get-Process | Where-Object MainWindowTitle | Select-Object ProcessName, MainWindowTitle
 Copy-Item .\prompts\system_prompt_template.txt .\prompts\my_game.txt
 notepad .\prompts\my_game.txt
 ```
 
-替换全部三个占位符，保存为UTF-8：
-
-- `{GAME_NAME}`：例如 `Zenless Zone Zero`。
-- `{GAME_RULES}`：当前场景、规则与具体目标，例如训练场接近目标并普通攻击。
-- `{KEY_BINDINGS}`：逐行填写你在游戏设置中实际核实的键位，使用官方训练词表，例如 `- W -> Move forward`。不要凭其他游戏的键位猜测。
-
-保留模板的Output Format、Action标签和其余协议文本。然后执行：
+把 `{GAME_NAME}`、`{GAME_RULES}`、`{KEY_BINDINGS}` 换成游戏名、当前场景与目标，以及从游戏设置核对的键位。保留其余动作格式文本。比如训练场移动可以先描述 `W`、`A`、`S`、`D` 的作用。把下列命令中的 `YOUR_WINDOW_TITLE` 替换为实际窗口标题或可唯一匹配的片段。
 
 ```powershell
-.\.venv\Scripts\python.exe .\windows_infer_once.py --image .\game.png --prompt .\prompts\my_game.txt
+.\.venv\Scripts\python.exe -m gamescaling.windows_client --window "YOUR_WINDOW_TITLE" --prompt .\prompts\my_game.txt
 ```
 
-程序会把原图缩至854×480后发送，打印模型建议，仍不执行操作。当前服务限制单张输入不超过400万像素，3840×2160原图不能直接原尺寸上传；本示例的客户端缩放已处理这点。
+看到 `Switch to the game window` 后，切回游戏。客户端只截取绑定窗口的内容。窗口消失、最小化、被明显遮挡或截图全黑时，客户端会退出并给出原因。可加 `--process` 指定可执行文件名（包含 `.exe`），避免与其他窗口重名。
 
-## 7. 当前历史与调度设置
+## 7. 开启动作执行
 
-- `image_size=(854,480)`：客户端上传前缩放，游戏显示分辨率不随之改变。
-- `history_len=2`：连续运行时保留过去两轮截图和动作，外加当前截图，共最多3张图。库默认5，本示例显式选2；尚未证明哪一项在《绝区零》中效果最佳。
-- `reasoning=False, max_tokens=512`：与已验证的无思考服务调用一致。
-- 当前服务最多接收6张图片，对应最多5轮历史；上下文总预算8192 tokens。超限会报错，不会自动缩减历史。
+观察模式识别的目标窗口和动作均符合预期后，在训练场运行以下短测试。只启用已核实且适合当前目标的键位。
 
-单帧程序没有连续运行调度。未来完整Windows控制器需要维护“只保留最新截图”的缓冲区，按上一轮推理及动作执行完成触发下一轮，并把实际执行的动作记录进历史。截图可5Hz，但不能将推理请求固定按5Hz堆积：当前V100固定负载推理约450–720ms，加动作执行约200ms后，串行闭环只能先按约1–1.5Hz规划，还未计网络、截图等开销。
+```powershell
+.\.venv\Scripts\python.exe -m gamescaling.windows_client --window "YOUR_WINDOW_TITLE" --prompt .\prompts\my_game.txt --execute --keys "W,A,S,D,LB" --mouse-look --turns 8 --seconds 15
+```
+
+- 按 **F12** 即可停止，也可以切离绑定窗口。客户端会释放当前按住的键和鼠标键。F12 保留给停止功能。PowerShell 在前台时也可用 Ctrl+C 停止。
+- `--keys` 填可执行的游戏键和鼠标键，例如 `LB` 是左键。`--mouse-look` 允许相对鼠标移动。需要滚轮时显式加 `--wheel`。超出启用范围或格式异常的动作会结束当前会话。
+- 每次只处理一帧，执行约 200 ms 的动作后再截图。默认保留最近两轮已执行动作和对应画面，可用 `--history 0` 降低延迟。截图到动作启动默认最多 1500 ms，可用 `--max-age-ms` 调整。
+- 游戏输入由 Windows `SendInput` 发送，目标窗口必须在前台。若游戏不接受系统合成输入，观察模式仍可用于检查推理结果。 [Microsoft SendInput 说明](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
 
 ## 8. 常见问题
 
 | 现象 | 排查方法 |
 |---|---|
-| `py` / `git` 找不到 | 安装后重新打开PowerShell；检查安装器是否提供launcher及命令路径 |
-| `.venv\Scripts\python.exe` 不存在 | 确认当前目录是仓库根目录，并且创建venv命令成功 |
-| 连接超时/拒绝 | 检查LAN地址与12388；跨网先确认VPN及容器SSH12322可达，或隧道窗口仍在运行 |
-| health成功，models返回401 | 检查同一个PowerShell窗口的key变量；确认沿用现有key且无多余空格 |
-| 404 | Base URL包含一次 `/v1`；模型列表路径是 `/v1/models` |
-| 413 `image_too_large` | 确认使用本示例的缩放设置，且没有直接上传4K原始图 |
-| 422 | 请求字段或消息结构不符合当前服务；优先使用本fork的客户端 |
-| 503 `model_busy` | 已有一次推理执行中，等它结束；不要启动并行循环反复提交 |
-| `context_length_exceeded` | 减少输入图片尺寸/历史或提示词长度；当前服务不自动裁剪 |
-| 模型返回动作但游戏不动 | 本教程只做推理观察；Windows输入执行器尚未实现 |
+| health 成功，models 返回 401 | 确认同一个 PowerShell 窗口中使用了现有 API key |
+| 连接超时 | 检查局域网映射或 SSH 隧道是否可达 |
+| 绑定窗口失败 | 用 `Get-Process` 核对标题和进程名，并恢复窗口 |
+| 截图全黑或被遮挡 | 使用窗口或无边框模式，关闭挡在窗口上的浮层，再前台运行 |
+| 提示帧过期 | 先用 `--history 0` 测试网络和推理时延 |
+| `Model requested keys outside the enabled set` | 核对实际键位和任务提示词，再决定是否允许对应输入 |
+| `SendInput failed` | 先验证观察模式，检查游戏是否接收普通系统合成输入 |
 
-使用结束可在同一个PowerShell窗口清除临时key：
+用完可清除当前 PowerShell 会话内的 key。
 
 ```powershell
 Remove-Item Env:\GAMESCALING_API_KEY
 Remove-Variable gsHeaders -ErrorAction SilentlyContinue
 ```
 
-## 9. 到哪一步才算完成
-
-本教程的验收是：离线解析成功 → health可达 → 鉴权models成功 → 示例图片动作可解析 → 自己的游戏截图能返回动作。
-
-完成后，Windows侧的网络、Python和推理调用已跑通。让游戏自主行动仍需实现并验证：窗口/DPI正确截图、任务目标入口、按真实窗口尺寸换算鼠标、六个33ms按键状态执行、焦点检查、停止与释放按键、过期响应丢弃及执行后历史提交。这些功能不在当前教程中冒充已经存在。
-
-官方来源与Windows命令依据见 [windows-client-sources.md](windows-client-sources.md)。服务安装与API限制见 [v100-transformers.md](v100-transformers.md)，GPU速度实测见 [v100-performance.md](v100-performance.md)。
+安装与网络命令见 [官方来源核验](windows-client-sources.md)。推理服务的环境和性能数据见 [V100 部署](v100-transformers.md)和 [V100 性能报告](v100-performance.md)。

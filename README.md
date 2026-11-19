@@ -44,9 +44,8 @@ This fork adds a single-GPU FP16 Transformers backend for the original client.
 See [the V100 deployment guide](docs/v100-transformers.md) for installation,
 authenticated endpoints, verification, and limitations. The upstream client,
 action protocol, prompts, examples, and evaluation adapters are retained.
-For Windows HTTP setup and single-image inference, see the
-[Windows client tutorial](docs/windows-client.md). Automatic Windows game
-capture and keyboard/mouse execution are not implemented in this fork yet.
+For Windows installation, game-window capture, and keyboard/mouse control,
+see the [Windows client tutorial](docs/windows-client.md).
 
 ## News
 
