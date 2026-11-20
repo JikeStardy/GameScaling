@@ -130,6 +130,16 @@ notepad .\prompts\my_game.txt
 - `--keys` 填可执行的游戏键和鼠标键，例如 `LB` 是左键。`--mouse-look` 允许相对鼠标移动。需要滚轮时显式加 `--wheel`。超出启用范围或格式异常的动作会结束当前会话。
 - 每次只处理一帧，执行约 200 ms 的动作后再截图。默认保留最近两轮已执行动作和对应画面，可用 `--history 0` 降低延迟。截图到动作启动默认最多 1500 ms，可用 `--max-age-ms` 调整。
 - 游戏输入由 Windows `SendInput` 发送，目标窗口必须在前台。若游戏不接受系统合成输入，观察模式仍可用于检查推理结果。 [Microsoft SendInput 说明](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
+- 日志中的 `sent` 表示 Windows 输入 API 接收了事件，`no-op` 表示此轮动作为空，`observed` 表示观察模式。若要确认游戏接受了按键，请观察角色是否实际移动。
+
+游戏没有响应时，可在训练场的开阔处，用独立测试发送一次 `S`，约 200 ms 后释放。该测试不请求推理服务。先用 `scan-code`，再用 `virtual-key` 做同条件对照。
+
+```powershell
+.\.venv\Scripts\python.exe -m gamescaling.windows_client --window "YOUR_WINDOW_TITLE" --execute --probe-key S --keyboard-mode scan-code
+.\.venv\Scripts\python.exe -m gamescaling.windows_client --window "YOUR_WINDOW_TITLE" --execute --probe-key S --keyboard-mode virtual-key
+```
+
+`scan-code` 是默认模式。两种模式都使用 Windows `SendInput`，支持前台检查和 F12 停止。
 
 ## 8. 常见问题
 

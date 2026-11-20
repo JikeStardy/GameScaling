@@ -65,7 +65,30 @@ _SCANS.update({"Eleven": 0x57, "Shift": 0x2a, "Ctrl": 0x1d, "Alt": 0x38,
                "Insert": 0x52, "Delete": 0x53, "Home": 0x47, "End": 0x4f,
                "Up": 0x48, "Down": 0x50, "Left": 0x4b, "Right": 0x4d})
 _EXTENDED = frozenset(("Insert", "Delete", "Home", "End", "Up", "Down", "Left", "Right"))
+# Documented Win32 virtual keys. OEM punctuation follows the US ANSI layout.
+_VIRTUAL_KEYS = {c: ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+_VIRTUAL_KEYS.update(dict(zip(("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"), range(0x30, 0x3a))))
+_VIRTUAL_KEYS.update(dict(zip(("One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven"), range(0x70, 0x7b))))
+_VIRTUAL_KEYS.update({"Shift": 0xa0, "Ctrl": 0xa2, "Alt": 0xa4, "Tab": 0x09,
+                      "Caps": 0x14, "Esc": 0x1b, "Space": 0x20, "Enter": 0x0d,
+                      "Back": 0x08, "Delete": 0x2e, "Insert": 0x2d,
+                      "Home": 0x24, "End": 0x23, "Pause": 0x13,
+                      "Up": 0x26, "Down": 0x28, "Left": 0x25, "Right": 0x27,
+                      "Equal": 0xbb, "Minus": 0xbd, "Period": 0xbe,
+                      "Slash": 0xbf, "Quote": 0xde})
 _MOUSE_BUTTONS = {"LB": (0x0002, 0x0004), "RB": (0x0008, 0x0010), "MB": (0x0020, 0x0040)}
+
+
+def _keyboard_input(token: str, up: bool, mode: str) -> INPUT:
+    """Build one keyboard event; F12 is reserved for the stop hotkey."""
+    if mode not in ("scan-code", "virtual-key"):
+        raise ValueError(f"Unsupported keyboard mode: {mode!r}")
+    if token not in _VIRTUAL_KEYS:
+        raise ValueError(f"Unsupported or reserved keyboard token: {token!r}")
+    flags = (0x0001 if token in _EXTENDED else 0) | (0x0002 if up else 0)
+    if mode == "virtual-key" or token == "Pause":
+        return INPUT(type=1, ki=KEYBDINPUT(_VIRTUAL_KEYS[token], 0, flags, 0, 0))
+    return INPUT(type=1, ki=KEYBDINPUT(0, _SCANS[token], flags | 0x0008, 0, 0))
 
 
 def _api():
@@ -121,11 +144,15 @@ def _process_name(kernel, pid):
 class WindowsDesktop:
     """Bind one visible window; capture its client and send foreground input."""
 
-    def __init__(self, window_title: str, *, process_name: str | None = None):
+    def __init__(self, window_title: str, *, process_name: str | None = None,
+                 keyboard_mode: str = "scan-code"):
         if not isinstance(window_title, str) or not window_title.strip():
             raise ValueError("window_title must be a non-empty literal substring")
         if process_name is not None and (not isinstance(process_name, str) or not process_name.strip() or any(c in process_name for c in "\\/")):
             raise ValueError("process_name must be an executable basename")
+        if keyboard_mode not in ("scan-code", "virtual-key"):
+            raise ValueError("keyboard_mode must be scan-code or virtual-key")
+        self.keyboard_mode = keyboard_mode
         self._user, self._kernel = _api()
         matches = self._candidates(window_title, process_name)
         if len(matches) != 1:
@@ -261,12 +288,9 @@ class WindowsDesktop:
                 self._mouse_target()
             flags = _MOUSE_BUTTONS[token][int(up)]
             item = INPUT(type=0, mi=MOUSEINPUT(0, 0, 0, flags, 0, 0))
-        elif token == "Pause":
-            # Pause has an E1 sequence; send its virtual key rather than an E0 scan.
-            item = INPUT(type=1, ki=KEYBDINPUT(0x13, 0, 0x0002 if up else 0, 0, 0))
         else:
-            flags = 0x0008 | (0x0001 if token in _EXTENDED else 0) | (0x0002 if up else 0)
-            item = INPUT(type=1, ki=KEYBDINPUT(0, _SCANS[token], flags, 0, 0))
+            # Pause uses its virtual key in both modes because it has an E1 sequence.
+            item = _keyboard_input(token, up, self.keyboard_mode)
         self._send(item)
 
     def key_down(self, token: str):

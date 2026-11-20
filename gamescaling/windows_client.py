@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from PIL import Image
 
-from .action import ACTION_END, KEY_VOCAB, STEP_MS, parse_action, strict_action
+from .action import ACTION_END, CHUNK_MS, CHUNK_STEPS, KEY_VOCAB, STEP_MS, Action, parse_action, strict_action
 from .policy import GameScalingPolicy, PolicyConfig, Proposal
 from .windows_io import WindowsDesktop
 
@@ -55,29 +55,37 @@ class ActionExecutor:
         if errors:
             raise StopRun(f"Windows failed to release {len(errors)} input(s).") from errors[0]
 
-    def execute(self, action, dimensions, check, wait):
+    def execute(self, action, dimensions, check, wait) -> bool:
         width, height = dimensions
         dx, dy, scroll = action.mouse
+        motion = (round(dx * width / 1000), round(dy * height / 1000))
+        notches = round(scroll)
+        sent = False
         try:
             check()
-            if dx or dy:
-                self.desktop.mouse_move(round(dx * width / 1000), round(dy * height / 1000))
-            if round(scroll):
+            if any(motion):
+                self.desktop.mouse_move(*motion)
+                sent = True
+            if notches:
                 check()
-                self.desktop.scroll(round(scroll))
+                self.desktop.scroll(notches)
+                sent = True
             for group in action.steps:
                 check()
                 desired = set(group)
                 for token in sorted(self.held - desired):
                     self.desktop.key_up(token)
                     self.held.remove(token)
+                    sent = True
                 for token in sorted(desired - self.held):
                     check()
                     self.desktop.key_down(token)
                     self.held.add(token)
+                    sent = True
                 wait(STEP_MS / 1000)
         finally:
             self.release()
+        return sent
 
 
 def request_proposal(policy, image, check, deadline=None):
@@ -109,9 +117,10 @@ def request_proposal(policy, image, check, deadline=None):
 
 
 def run_window(args, policy, allowed_keys):
-    desktop = WindowsDesktop(args.window, process_name=args.process)
+    desktop = WindowsDesktop(args.window, process_name=args.process, keyboard_mode=args.keyboard_mode)
     executor = ActionExecutor(desktop)
     print(f"Target: {desktop.title} ({desktop.process_name or 'unknown process'})", flush=True)
+    print(f"Windows keyboard mode: {args.keyboard_mode}", flush=True)
     print("Switch to the game window. Press F12 to stop.", flush=True)
     focus_deadline = time.monotonic() + args.focus_timeout
     while not desktop.is_foreground():
@@ -140,6 +149,13 @@ def run_window(args, policy, allowed_keys):
     try:
         # Give the manually activated window a moment to finish switching.
         wait(0.2)
+        if args.probe_key:
+            action = Action(steps=[[args.probe_key] for _ in range(CHUNK_STEPS)], parsed=True)
+            executor.execute(action, desktop.dimensions(), check, wait)
+            print(f"Probe sent: {args.probe_key} held for {CHUNK_MS:g} ms ({args.keyboard_mode}). "
+                  "Check the game for movement.", flush=True)
+            return
+        assert policy is not None
         for index in range(args.turns):
             check()
             captured_at = time.monotonic()
@@ -148,6 +164,7 @@ def run_window(args, policy, allowed_keys):
             proposal = request_proposal(policy, image, check, fresh_until)
             action = strict_proposal(proposal, policy.cfg, allowed_keys)
             age = (time.monotonic() - captured_at) * 1000
+            status = "observed"
             if args.execute:
                 if age >= args.max_age_ms or desktop.dimensions() != image.size:
                     raise StopRun("Screenshot expired or the game window was resized.")
@@ -155,13 +172,14 @@ def run_window(args, policy, allowed_keys):
                     raise StopRun("Mouse movement is disabled. Enable it with --mouse-look.")
                 if action.mouse[2] and not args.wheel:
                     raise StopRun("Scrolling is disabled. Enable it with --wheel.")
-                executor.execute(action, image.size, check, wait)
+                sent = executor.execute(action, image.size, check, wait)
+                status = "sent" if sent else "no-op"
                 policy.remember(proposal)
-            print(f"Turn {index + 1} {'executed' if args.execute else 'observed'} "
-                  f"({age:.0f} ms): {action.to_text()}", flush=True)
+            print(f"Turn {index + 1} {status} ({age:.0f} ms): {action.to_text()}", flush=True)
     finally:
         executor.release()
-        policy.reset()
+        if policy is not None:
+            policy.reset()
 
 
 def main(argv=None):
@@ -170,9 +188,13 @@ def main(argv=None):
     source.add_argument("--window", help="Unique visible window title or title substring")
     source.add_argument("--image", type=Path, help="Send one image file and print its action")
     parser.add_argument("--process", help="Optional executable basename, e.g. ZenlessZoneZero.exe")
-    parser.add_argument("--prompt", required=True, type=Path, help="Completed GameScaling system prompt")
+    parser.add_argument("--prompt", type=Path, help="Completed GameScaling system prompt (required for inference)")
     parser.add_argument("--base-url", default=os.environ.get("GAMESCALING_BASE_URL", ""))
     parser.add_argument("--execute", action="store_true", help="Send validated inputs to the bound window")
+    parser.add_argument("--keyboard-mode", default="scan-code", choices=("scan-code", "virtual-key"),
+                        help="Standard Windows SendInput keyboard encoding")
+    parser.add_argument("--probe-key", choices=("W", "A", "S", "D"),
+                        help="Send one 200 ms movement hold without calling the model; requires --window and --execute")
     parser.add_argument("--keys", help="Comma-separated GameScaling key tokens enabled for execution")
     parser.add_argument("--mouse-look", action="store_true", help="Allow relative mouse movement")
     parser.add_argument("--wheel", action="store_true", help="Allow mouse wheel actions")
@@ -186,22 +208,32 @@ def main(argv=None):
         parser.error("turns, seconds, focus-timeout and max-age-ms must be positive")
     if args.execute and not args.window:
         parser.error("--execute requires --window")
-    if args.execute and not args.keys:
+    if args.probe_key and not (args.window and args.execute):
+        parser.error("--probe-key requires --window and --execute")
+    if not args.probe_key and args.prompt is None:
+        parser.error("--prompt is required for inference")
+    if args.execute and not (args.probe_key or args.keys):
         parser.error("--execute requires --keys")
     supported_keys = KEY_VOCAB - {"Twelve"}
     allowed_keys = {item.strip() for item in args.keys.split(",")} if args.keys else set(supported_keys)
     if not allowed_keys <= supported_keys:
         parser.error("--keys must use GameScaling tokens, and F12 (Twelve) is reserved")
+    if args.probe_key and args.probe_key not in allowed_keys:
+        parser.error("--probe-key must be included in --keys when --keys is provided")
     try:
-        url = urlsplit(args.base_url)
-    except ValueError:
-        parser.error("Invalid API Base URL")
-    if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.query or url.fragment or url.path.rstrip("/") != "/v1":
-        parser.error("Set GAMESCALING_BASE_URL to the GameScaling API URL ending in /v1")
-    key = os.environ.get("GAMESCALING_API_KEY", "").strip()
-    if not key or key == "EMPTY":
-        parser.error("Set GAMESCALING_API_KEY for the current PowerShell session")
-    try:
+        if args.probe_key:
+            run_window(args, None, set())
+            return 0
+        try:
+            url = urlsplit(args.base_url)
+        except ValueError:
+            parser.error("Invalid API Base URL")
+        if (url.scheme not in ("http", "https") or not url.hostname or url.username or url.password
+                or url.query or url.fragment or url.path.rstrip("/") != "/v1"):
+            parser.error("Set GAMESCALING_BASE_URL to the GameScaling API URL ending in /v1")
+        key = os.environ.get("GAMESCALING_API_KEY", "").strip()
+        if not key or key == "EMPTY":
+            parser.error("Set GAMESCALING_API_KEY for the current PowerShell session")
         prompt = args.prompt.read_text(encoding="utf-8-sig").strip()
         if not prompt or any(mark in prompt for mark in ("{GAME_NAME}", "{GAME_RULES}", "{KEY_BINDINGS}")):
             parser.error("Fill the game name, rules and key bindings in the prompt")

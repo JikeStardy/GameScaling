@@ -1,9 +1,11 @@
 from PIL import Image
 import pytest
 
-from gamescaling.action import ACTION_END, ACTION_START
+from gamescaling.action import ACTION_END, ACTION_START, Action
 from gamescaling.policy import GameScalingPolicy, PolicyConfig
+from gamescaling import windows_client
 from gamescaling.windows_client import ActionExecutor, StopRun, strict_proposal
+from gamescaling.windows_io import _keyboard_input
 
 
 class Desktop:
@@ -85,3 +87,51 @@ def test_only_committed_proposal_enters_history_and_keys_are_held_between_steps(
     assert desktop.events == [("move", 10, 0), ("down", "W"), ("up", "W")]
     policy.remember(proposal)
     assert len(policy.messages("new")) == 4
+
+
+def test_probe_sends_one_200ms_chunk_without_server_credentials(monkeypatch, capsys):
+    class ProbeDesktop(Desktop):
+        title = "Training window"
+        process_name = "game.exe"
+
+        def stop_pressed(self):
+            return False
+
+        def dimensions(self):
+            return (1920, 1080)
+
+    desktop = ProbeDesktop()
+    modes = []
+
+    def bind(_title, *, process_name, keyboard_mode):
+        modes.append((process_name, keyboard_mode))
+        return desktop
+
+    monkeypatch.setattr(windows_client, "WindowsDesktop", bind)
+    monkeypatch.delenv("GAMESCALING_API_KEY", raising=False)
+    monkeypatch.delenv("GAMESCALING_BASE_URL", raising=False)
+    assert windows_client.main([
+        "--window", "Training", "--process", "game.exe", "--execute",
+        "--probe-key", "S", "--keyboard-mode", "virtual-key",
+    ]) == 0
+    assert modes == [("game.exe", "virtual-key")]
+    assert desktop.events == [("down", "S"), ("up", "S")]
+    assert "Probe sent: S held for 200 ms" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("scan-code", (0, 0x1f, 0x8, 0xA)),
+    ("virtual-key", (0x53, 0, 0, 0x2)),
+])
+def test_probe_key_encodes_standard_win32_down_and_up_records(mode, expected):
+    down = _keyboard_input("S", False, mode).ki
+    up = _keyboard_input("S", True, mode).ki
+    assert (down.wVk, down.wScan, down.dwFlags, up.dwFlags) == expected
+    assert (up.wVk, up.wScan) == (down.wVk, down.wScan)
+
+
+def test_subpixel_motion_and_fractional_scroll_do_not_report_sent():
+    desktop = Desktop()
+    action = Action(mouse=(0.01, -0.01, 0.1), parsed=True)
+    assert ActionExecutor(desktop).execute(action, (1920, 1080), lambda: None, lambda _: None) is False
+    assert desktop.events == []
